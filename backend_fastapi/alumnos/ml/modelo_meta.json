@@ -1,0 +1,21 @@
+{
+  "features": [
+    "edad",
+    "grado",
+    "condicion_social",
+    "promedio_notas",
+    "genero_M",
+    "edah_da_total",
+    "edah_h_total"
+  ],
+  "target": "tdah_presente",
+  "clases": {
+    "0": "Sin TDAH",
+    "1": "Con TDAH"
+  },
+  "n_estimators": 96,
+  "best_recall_cv": 0.9678362573099415,
+  "test_accuracy": 1.0,
+  "test_recall": 1.0,
+  "test_auc": 1.0
+}

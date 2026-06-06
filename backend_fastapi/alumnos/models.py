@@ -61,10 +61,11 @@ class PrediccionAcademica(Base):
     id = Column(Integer, primary_key=True, index=True)
     alumno_id = Column(Integer, ForeignKey("alumnos.id"), nullable=False)
     promedio_notas = Column(Float, nullable=False)
-    nivel_riesgo = Column(String(10), nullable=False)
+    nivel_riesgo = Column(String(20), nullable=False)
     probabilidad = Column(Float, nullable=True)
     prediccion_notas = Column(String, nullable=False)
     condiciones_psicoeducativas = Column(String, nullable=False)
+    explicacion_xai = Column(String, nullable=True)
     fecha_prediccion = Column(DateTime, default=datetime.utcnow)
 
 

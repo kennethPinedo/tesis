@@ -140,11 +140,18 @@ function buildFactoresData(pred) {
   ].sort((a, b) => b.valor - a.valor);
 }
 
-function deriveTdahLevel(nivelTdah) {
-  if (!nivelTdah) return "Bajo";
-  if (nivelTdah.includes("Tipo Combinado")) return "Alto";
-  if (nivelTdah.includes("Posible")) return "Moderado";
+function deriveTdahLevel(probabilidad) {
+  if (probabilidad == null) return "Bajo";
+  if (probabilidad > 0.60) return "Alto";
+  if (probabilidad > 0.35) return "Moderado";
   return "Bajo";
+}
+
+function tdahEtiqueta(probabilidad) {
+  if (probabilidad == null) return "—";
+  if (probabilidad > 0.60) return "Con TDAH";
+  if (probabilidad > 0.35) return "Posible TDAH";
+  return "Sin TDAH";
 }
 
 function generarRecomendaciones(pred) {
@@ -443,11 +450,9 @@ export default function App() {
             ? (dashData.nivel_riesgo === "Alto" ? "#ef4444" : dashData.nivel_riesgo === "Medio" ? "#f97316" : "#22c55e")
             : "#94a3b8";
 
-          const tdahLevel = dashData ? deriveTdahLevel(dashData.nivel_tdah) : null;
+          const tdahLevel = dashData ? deriveTdahLevel(dashData.probabilidad) : null;
           const tdahColor = tdahLevel === "Alto" ? "#ef4444" : tdahLevel === "Moderado" ? "#f97316" : "#22c55e";
-          const tdahProbPct = dashData
-            ? Math.round((dashData.total_atencion + dashData.total_hiperactividad) / 60 * 100)
-            : 0;
+          const tdahProbPct = dashData ? Math.round((dashData.probabilidad ?? 0) * 100) : 0;
           const rendimiento = dashData ? Math.round((dashData.promedio_notas / 20) * 100) : 0;
           const rendColor = rendimiento >= 75 ? "#22c55e" : rendimiento >= 50 ? "#f97316" : "#ef4444";
 
@@ -516,9 +521,9 @@ export default function App() {
                     <div className="kpi-card">
                       <div className="kpi-icon kpi-icon--brain">🧠</div>
                       <div className="kpi-body">
-                        <span className="kpi-label">Riesgo TDAH</span>
+                        <span className="kpi-label">Predicción TDAH</span>
                         <span className="kpi-value" style={{ color: tdahColor }}>
-                          {tdahLevel}
+                          {tdahEtiqueta(dashData.probabilidad)}
                         </span>
                         <span className="kpi-sub">
                           Probabilidad: {tdahProbPct}%
@@ -777,26 +782,29 @@ export default function App() {
               </select>
               <button type="button" onClick={generarPrediccion}>Generar Predicción</button>
             </div>
-            {predicciones.map((p) => (
-              <div key={p.id} className="card">
-                <strong>{p.alumno_nombre ?? "Alumno"}</strong><br />
-                <b>Nivel de Riesgo Académico:</b>{" "}
-                <span style={{ color: p.nivel_riesgo === "Alto" ? "#d62828" : p.nivel_riesgo === "Medio" ? "#e07b00" : "#14732b", fontWeight: "bold" }}>
-                  {p.nivel_riesgo}
-                </span>
-                {p.probabilidad != null && <> ({(p.probabilidad * 100).toFixed(1)}%)</>}<br />
-                <b>Indicador TDAH:</b>{" "}
-                <span style={{ color: p.nivel_tdah && p.nivel_tdah.startsWith("Posible") ? "#d62828" : "#14732b", fontWeight: "bold" }}>
-                  {p.nivel_tdah ?? "—"}
-                </span><br />
-                {p.total_atencion != null && (
-                  <><b>Atención:</b> {p.total_atencion}/30{"  "}<b>Hiperactividad:</b> {p.total_hiperactividad}/30<br /></>
-                )}
-                <b>Promedio de Notas:</b> {p.prediccion_notas}<br />
-                <b>Condiciones:</b> {p.condiciones_psicoeducativas}<br />
-                <small style={{ color: "#888" }}>{p.fecha_prediccion}</small>
-              </div>
-            ))}
+            {predicciones.map((p) => {
+              const riesgoColor = p.nivel_riesgo === "Alto" ? "#d62828" : p.nivel_riesgo === "Medio" ? "#e07b00" : "#14732b";
+              const tdahEtiq = tdahEtiqueta(p.probabilidad);
+              const tdahColor = tdahEtiq === "Con TDAH" ? "#d62828" : tdahEtiq === "Posible TDAH" ? "#e07b00" : "#14732b";
+              return (
+                <div key={p.id} className="card">
+                  <strong>{p.alumno_nombre ?? "Alumno"}</strong><br />
+                  <b>Riesgo Académico:</b>{" "}
+                  <span style={{ color: riesgoColor, fontWeight: "bold" }}>{p.nivel_riesgo}</span><br />
+                  <b>Predicción TDAH:</b>{" "}
+                  <span style={{ color: tdahColor, fontWeight: "bold" }}>{tdahEtiq}</span>
+                  {p.probabilidad != null && <> ({(p.probabilidad * 100).toFixed(1)}%)</>}<br />
+                  <b>Promedio de Notas:</b> {p.prediccion_notas}/20<br />
+                  <b>Condiciones:</b> {p.condiciones_psicoeducativas}<br />
+                  {p.explicacion_xai && (
+                    <p style={{ marginTop: 8, padding: "8px 10px", background: "#f0f4ff", borderLeft: "3px solid #3b82f6", borderRadius: 4, fontSize: "0.9em", color: "#1e3a5f" }}>
+                      <b>Explicación SHAP:</b> {p.explicacion_xai}
+                    </p>
+                  )}
+                  <small style={{ color: "#888" }}>{p.fecha_prediccion}</small>
+                </div>
+              );
+            })}
           </article>
         )}
 

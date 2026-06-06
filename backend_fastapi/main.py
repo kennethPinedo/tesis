@@ -10,13 +10,16 @@ from alumnos.routers import alumnos, encuestas, notas, predicciones, expedientes
 
 Base.metadata.create_all(bind=engine)
 
-# Migración: agrega columna genero si no existe en tablas creadas anteriormente
 with engine.connect() as _conn:
-    try:
-        _conn.execute(text("ALTER TABLE alumnos ADD COLUMN genero VARCHAR(20) DEFAULT 'No especificado'"))
-        _conn.commit()
-    except Exception:
-        pass  # La columna ya existe
+    for _sql in [
+        "ALTER TABLE alumnos ADD COLUMN genero VARCHAR(20) DEFAULT 'No especificado'",
+        "ALTER TABLE predicciones ADD COLUMN explicacion_xai TEXT",
+    ]:
+        try:
+            _conn.execute(text(_sql))
+            _conn.commit()
+        except Exception:
+            pass
 
 app = FastAPI(title="Tesis API", version="1.0.0")
 

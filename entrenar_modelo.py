@@ -1,218 +1,249 @@
-"""
-Reentrenamiento mejorado del modelo XGBoost.
-Estrategia:
-  1. Class weights balanceados (principal mejora para recall de Alto)
-  2. SMOTE oversampling sobre clase minoritaria
-  3. RandomizedSearchCV para hiperparametros optimos (metrica: f1_macro)
-  4. Comparacion completa antes/despues
-  5. Guarda el mejor modelo sobre modelo_xgb.pkl
-"""
 import os, warnings, time
 warnings.filterwarnings("ignore")
 
 import joblib
 import numpy as np
 import pandas as pd
+from sklearn.model_selection import train_test_split, RandomizedSearchCV, StratifiedKFold
 from sklearn.metrics import (
-    accuracy_score, classification_report, confusion_matrix,
-    roc_auc_score, cohen_kappa_score, f1_score
+    classification_report, confusion_matrix,
+    recall_score, roc_auc_score, f1_score, accuracy_score
 )
-from sklearn.utils.class_weight import compute_sample_weight
-from sklearn.model_selection import RandomizedSearchCV, StratifiedKFold
 from xgboost import XGBClassifier
 
 BASE        = os.path.dirname(__file__)
+DATASET_CSV = os.path.join(BASE, "dataset", "output", "dataset_tdah_completo (1).csv")
 MODELO_PATH = os.path.join(BASE, "backend_fastapi", "alumnos", "ml", "modelo_xgb.pkl")
 TRAIN_CSV   = os.path.join(BASE, "dataset", "output", "train.csv")
 VAL_CSV     = os.path.join(BASE, "dataset", "output", "val.csv")
 TEST_CSV    = os.path.join(BASE, "dataset", "output", "test.csv")
 
-FEATURES = ["edad", "condicion_social", "promedio_notas", "prom_atencion", "prom_hiperactividad"]
-TARGET   = "nivel_riesgo_academico"
-STR2INT  = {"Bajo": 0, "Medio": 1, "Alto": 2}
-INT2STR  = {0: "Bajo", 1: "Medio", 2: "Alto"}
-CLASES   = ["Bajo", "Medio", "Alto"]
-
-# ── Cargar datos ──────────────────────────────────────────────────────────────
-train = pd.read_csv(TRAIN_CSV)
-val   = pd.read_csv(VAL_CSV)
-test  = pd.read_csv(TEST_CSV)
-
-# Combinar train+val para búsqueda de hiperparámetros
-trainval = pd.concat([train, val], ignore_index=True)
-
-def prep(df):
-    X = df[FEATURES].values
-    y = df[TARGET].map(STR2INT).values
-    return X, y
-
-X_tr, y_tr   = prep(train)
-X_va, y_va   = prep(val)
-X_te, y_te   = prep(test)
-X_tv, y_tv   = prep(trainval)
-
 SEP = "=" * 64
 
-# ── Modelo actual (baseline) ──────────────────────────────────────────────────
-modelo_viejo = joblib.load(MODELO_PATH)
-
+# ── Cargar dataset ────────────────────────────────────────────────────────────
 print(f"\n{SEP}")
-print("  FASE 1: Metricas del modelo ACTUAL (baseline)")
+print("  CARGA Y PREPARACION DEL DATASET")
 print(SEP)
 
-def evaluar(modelo, X, y, nombre=""):
-    yp    = modelo.predict(X)
-    prob  = modelo.predict_proba(X)
-    acc   = accuracy_score(y, yp)
-    f1m   = f1_score(y, yp, average="macro")
-    auc   = roc_auc_score(y, prob, multi_class="ovr", average="macro")
-    kap   = cohen_kappa_score(y, yp)
-    yp_s  = [INT2STR[i] for i in yp]
-    y_s   = [INT2STR[i] for i in y]
-    f1_per = f1_score(y_s, yp_s, labels=CLASES, average=None)
-    return {"acc": acc, "f1_macro": f1m, "auc": auc, "kappa": kap,
-            "f1_bajo": f1_per[0], "f1_medio": f1_per[1], "f1_alto": f1_per[2],
-            "yp": yp, "yp_s": yp_s, "y_s": y_s}
+data = pd.read_csv(DATASET_CSV, sep=";")
+print(f"  Dataset: {data.shape[0]} registros, {data.shape[1]} columnas")
+print(f"  tdah_presente:\n{data['tdah_presente'].value_counts().to_string()}")
 
-m_old = evaluar(modelo_viejo, X_te, y_te)
-print(f"\n  Accuracy   : {m_old['acc']:.4f}")
-print(f"  F1 macro   : {m_old['f1_macro']:.4f}")
-print(f"  AUC-ROC    : {m_old['auc']:.4f}")
-print(f"  Kappa      : {m_old['kappa']:.4f}")
-print(f"  F1 Bajo    : {m_old['f1_bajo']:.4f}")
-print(f"  F1 Medio   : {m_old['f1_medio']:.4f}")
-print(f"  F1 Alto    : {m_old['f1_alto']:.4f}  <<< PROBLEMA")
+# ── Feature engineering (igual que notebook) ─────────────────────────────────
+COLS_ELIMINAR = [
+    'id', 'tdah_presente', 'tdah_probabilidad', 'split',
+    'edah_h1','edah_h2','edah_h3','edah_h4','edah_h5',
+    'edah_da1','edah_da2','edah_da3','edah_da4','edah_da5',
+    'edah_tc1','edah_tc2','edah_tc3','edah_tc4','edah_tc5',
+    'edah_tc6','edah_tc7','edah_tc8','edah_tc9','edah_tc10',
+    'edah_tdah_total','edah_tc_total',
+    'conners_hiperact_tscore','conners_inatencion_tscore',
+    'conners_oposicion_tscore','conners_adhd_index_tscore',
+    'prom_atencion','prom_hiperactividad',
+    'nivel_riesgo_academico',
+]
 
-# ── Distribución y pesos ──────────────────────────────────────────────────────
+X = data.drop(columns=COLS_ELIMINAR)
+y = data['tdah_presente']
+
+X = pd.get_dummies(X, columns=['genero'], drop_first=True)
+
+# Garantizar columnas exactas en el orden correcto
+FEATURE_COLS = ['edad', 'grado', 'condicion_social', 'promedio_notas',
+                'genero_M', 'edah_da_total', 'edah_h_total']
+for col in FEATURE_COLS:
+    if col not in X.columns:
+        X[col] = 0
+X = X[FEATURE_COLS]
+
+print(f"  Features ({len(FEATURE_COLS)}): {FEATURE_COLS}")
+print(f"  Target  : tdah_presente  (0=Sin TDAH, 1=Con TDAH)")
+
+# ── Division 60 / 20 / 20 estratificada ──────────────────────────────────────
 print(f"\n{SEP}")
-print("  FASE 2: Calculo de class weights balanceados")
+print("  DIVISION  60% train  /  20% val  /  20% test  (estratificada)")
 print(SEP)
 
-# Calcular pesos para train+val (para la búsqueda) y solo train (para modelo final)
-w_tv = compute_sample_weight("balanced", y_tv)
-w_tr = compute_sample_weight("balanced", y_tr)
+X_trainval, X_test, y_trainval, y_test = train_test_split(
+    X, y, test_size=0.20, random_state=42, stratify=y
+)
+X_train, X_val, y_train, y_val = train_test_split(
+    X_trainval, y_trainval, test_size=0.25, random_state=42, stratify=y_trainval
+)
 
-unique, counts = np.unique(y_tr, return_counts=True)
-for u, c in zip(unique, counts):
-    w = w_tr[y_tr == u][0]
-    print(f"  Clase {INT2STR[u]:<6}: {c:>4} samples  weight={w:.4f}")
+print(f"\n  Train : {X_train.shape[0]} muestras  "
+      f"(TDAH={y_train.sum()}, Sin TDAH={( y_train==0).sum()})")
+print(f"  Val   : {X_val.shape[0]} muestras  "
+      f"(TDAH={y_val.sum()}, Sin TDAH={(y_val==0).sum()})")
+print(f"  Test  : {X_test.shape[0]} muestras  "
+      f"(TDAH={y_test.sum()}, Sin TDAH={(y_test==0).sum()})")
 
-# ── Busqueda de hiperparámetros ───────────────────────────────────────────────
+df_train = X_train.copy(); df_train['tdah_presente'] = y_train.values
+df_val   = X_val.copy();   df_val['tdah_presente']   = y_val.values
+df_test  = X_test.copy();  df_test['tdah_presente']  = y_test.values
+df_train.to_csv(TRAIN_CSV, index=False)
+df_val.to_csv(VAL_CSV,     index=False)
+df_test.to_csv(TEST_CSV,   index=False)
+print(f"\n  Splits guardados en dataset/output/")
+
+# ── RandomizedSearchCV (metrica: recall) ─────────────────────────────────────
 print(f"\n{SEP}")
-print("  FASE 3: RandomizedSearchCV (metrica: f1_macro)")
+print("  FASE 1: RandomizedSearchCV  (metrica=recall, 5-fold CV, 50 iter)")
 print(SEP)
 
-param_dist = {
-    "n_estimators":      [200, 300, 400, 500],
-    "max_depth":         [4, 5, 6, 7, 8],
-    "learning_rate":     [0.01, 0.05, 0.1, 0.15, 0.2],
-    "subsample":         [0.7, 0.8, 0.9, 1.0],
-    "colsample_bytree":  [0.7, 0.8, 0.9, 1.0],
-    "min_child_weight":  [1, 2, 3, 5],
-    "gamma":             [0, 0.1, 0.2, 0.3],
-    "reg_alpha":         [0, 0.01, 0.1, 1.0],
-    "reg_lambda":        [0.5, 1.0, 2.0, 5.0],
+param_grid = {
+    'n_estimators'    : np.arange(50, 300, 50),
+    'max_depth'       : [3, 4, 5, 6],
+    'learning_rate'   : [0.01, 0.05, 0.1],
+    'subsample'       : np.linspace(0.6, 1.0, 4),
+    'colsample_bytree': np.linspace(0.6, 1.0, 4),
+    'reg_alpha'       : [0, 0.1, 1, 5],
+    'reg_lambda'      : [1, 5, 10],
+    'min_child_weight': [1, 3, 5, 10],
 }
 
-cv = StratifiedKFold(n_splits=5, shuffle=True, random_state=42)
+skf = StratifiedKFold(n_splits=5, shuffle=True, random_state=42)
 
-base_xgb = XGBClassifier(
-    objective="multi:softprob",
-    num_class=3,
-    eval_metric="mlogloss",
-    use_label_encoder=False,
-    random_state=42,
-    tree_method="hist",
-    n_jobs=-1,
+xgb_base = XGBClassifier(
+    objective         ='binary:logistic',
+    eval_metric       =['logloss', 'auc'],
+    random_state      =42,
+    enable_categorical=False,
+    n_jobs            =-1,
 )
 
-search = RandomizedSearchCV(
-    base_xgb,
-    param_distributions=param_dist,
-    n_iter=60,
-    scoring="f1_macro",
-    cv=cv,
-    refit=True,
-    random_state=42,
-    n_jobs=-1,
-    verbose=1,
+random_search = RandomizedSearchCV(
+    estimator           =xgb_base,
+    param_distributions =param_grid,
+    cv                  =skf,
+    n_iter              =50,
+    n_jobs              =-1,
+    scoring             ='recall',
+    random_state        =42,
+    verbose             =1,
 )
 
-print("\n  Iniciando busqueda (60 iteraciones x 5-fold CV)...")
+print("\n  Iniciando busqueda...")
 t0 = time.time()
-search.fit(X_tv, y_tv, sample_weight=w_tv)
+random_search.fit(X_train, y_train)
 print(f"  Completado en {time.time()-t0:.1f}s")
-print(f"\n  Mejores parametros:")
-for k, v in search.best_params_.items():
+print(f"\n  Mejor recall CV: {random_search.best_score_:.4f}")
+print("  Mejores parametros:")
+best_params = random_search.best_params_
+for k, v in best_params.items():
     print(f"    {k:<22}: {v}")
-print(f"\n  Mejor F1-macro en CV: {search.best_score_:.4f}")
 
-# ── Entrenar modelo final con los mejores parametros ─────────────────────────
+# ── Entrenamiento con early stopping sobre validacion ────────────────────────
 print(f"\n{SEP}")
-print("  FASE 4: Entrenamiento final (train+val, class weights)")
+print("  FASE 2: Early stopping  (eval_set=val, early_stopping_rounds=10)")
 print(SEP)
 
-best_params = search.best_params_.copy()
-modelo_nuevo = XGBClassifier(
-    **best_params,
-    objective="multi:softprob",
-    num_class=3,
-    eval_metric="mlogloss",
-    use_label_encoder=False,
-    random_state=42,
-    tree_method="hist",
-    n_jobs=-1,
+params_es = best_params.copy()
+params_es.pop('n_estimators', None)
+
+xgb_es = XGBClassifier(
+    **params_es,
+    n_estimators          =500,
+    objective             ='binary:logistic',
+    eval_metric           =['auc', 'logloss'],
+    early_stopping_rounds =10,
+    random_state          =42,
+    enable_categorical    =False,
+    verbosity             =0,
 )
+xgb_es.fit(
+    X_train, y_train,
+    eval_set=[(X_train, y_train), (X_val, y_val)],
+    verbose=False,
+)
+best_iter = xgb_es.best_iteration
+print(f"\n  Mejor iteracion (early stopping): {best_iter}")
 
-modelo_nuevo.fit(X_tv, y_tv, sample_weight=w_tv)
-print("  Modelo entrenado.")
-
-# ── Evaluacion comparativa ────────────────────────────────────────────────────
+# ── Modelo final: train + val, n_estimators = best_iter + 1 ──────────────────
 print(f"\n{SEP}")
-print("  FASE 5: Comparacion ANTES vs DESPUES (Test set, n=300)")
+print("  FASE 3: Modelo final  (train+val, n_estimators={best_iter+1})")
 print(SEP)
 
-m_new = evaluar(modelo_nuevo, X_te, y_te)
+final_model = XGBClassifier(
+    **params_es,
+    n_estimators      =best_iter + 1,
+    objective         ='binary:logistic',
+    random_state      =42,
+    enable_categorical=False,
+)
+final_model.fit(X_trainval, y_trainval)
+print("  Modelo final entrenado.")
 
-def delta(v_new, v_old):
-    d = v_new - v_old
-    sign = "+" if d >= 0 else ""
-    return f"{sign}{d:+.4f}"
-
-print(f"\n  {'Metrica':<22} {'Antes':>8}  {'Despues':>8}  {'Cambio':>10}")
-print(f"  {'-'*54}")
-filas = [
-    ("Accuracy",   m_old["acc"],      m_new["acc"]),
-    ("F1 macro",   m_old["f1_macro"], m_new["f1_macro"]),
-    ("AUC-ROC",    m_old["auc"],      m_new["auc"]),
-    ("Kappa",      m_old["kappa"],    m_new["kappa"]),
-    ("F1 - Bajo",  m_old["f1_bajo"],  m_new["f1_bajo"]),
-    ("F1 - Medio", m_old["f1_medio"], m_new["f1_medio"]),
-    ("F1 - Alto",  m_old["f1_alto"],  m_new["f1_alto"]),
-]
-for nombre, vo, vn in filas:
-    flag = " <<<" if nombre == "F1 - Alto" else ""
-    print(f"  {nombre:<22} {vo:>8.4f}  {vn:>8.4f}  {delta(vn, vo):>10}{flag}")
-
-print(f"\n  Reporte completo por clase (nuevo modelo):")
-print(f"  {'-'*58}")
-print(classification_report(m_new["y_s"], m_new["yp_s"], labels=CLASES, target_names=CLASES, digits=4))
-
-print(f"  Matriz de Confusion (nuevo modelo):")
-cm = confusion_matrix(m_new["y_s"], m_new["yp_s"], labels=CLASES)
-print("  " + " " * 12 + "".join(f"  Pred {c:<6}" for c in CLASES))
-for i, c in enumerate(CLASES):
-    print(f"  Real {c:<8}" + "".join(f"  {cm[i,j]:>11}" for j in range(3)))
-
-# ── Guardar modelo ────────────────────────────────────────────────────────────
+# ── Evaluacion en los tres splits ────────────────────────────────────────────
 print(f"\n{SEP}")
-print("  FASE 6: Guardando modelo mejorado")
+print("  FASE 4: Metricas en Train / Val / Test")
 print(SEP)
 
-joblib.dump(modelo_nuevo, MODELO_PATH)
-print(f"\n  Modelo guardado en: {MODELO_PATH}")
-print(f"\n  Resumen final:")
-print(f"    F1 Alto:  {m_old['f1_alto']:.4f}  ->  {m_new['f1_alto']:.4f}  ({'+' if m_new['f1_alto']>m_old['f1_alto'] else ''}{(m_new['f1_alto']-m_old['f1_alto'])*100:.1f} puntos)")
-print(f"    F1 macro: {m_old['f1_macro']:.4f}  ->  {m_new['f1_macro']:.4f}")
-print(f"    Accuracy: {m_old['acc']:.4f}  ->  {m_new['acc']:.4f}")
+def metricas(mdl, X, y, nombre):
+    yp  = mdl.predict(X)
+    acc = accuracy_score(y, yp)
+    rec = recall_score(y, yp)
+    f1  = f1_score(y, yp)
+    print(f"\n  [{nombre}]  n={len(y)}  (TDAH={y.sum()}, Sin TDAH={(y==0).sum()})")
+    print(f"  Accuracy : {acc:.4f}")
+    print(f"  Recall   : {rec:.4f}  <- evitar falsos negativos")
+    print(f"  F1-score : {f1:.4f}")
+    print(f"  Matriz de confusion:")
+    cm = confusion_matrix(y, yp)
+    print(f"             Pred 0  Pred 1")
+    print(f"  Real 0      {cm[0,0]:>5}   {cm[0,1]:>5}")
+    print(f"  Real 1      {cm[1,0]:>5}   {cm[1,1]:>5}")
+    print(f"  Reporte completo:")
+    print(classification_report(y, yp, target_names=['Sin TDAH', 'Con TDAH']))
+    return acc, rec, f1
+
+acc_tr, rec_tr, f1_tr = metricas(final_model, X_train,    y_train,    "TRAIN")
+acc_va, rec_va, f1_va = metricas(final_model, X_val,      y_val,      "VAL")
+acc_te, rec_te, f1_te = metricas(final_model, X_test,     y_test,     "TEST")
+auc_te = roc_auc_score(y_test, final_model.predict_proba(X_test)[:,1])
+
+print(f"\n{SEP}")
+print("  RESUMEN FINAL")
+print(SEP)
+print(f"\n  {'Metrica':<18} {'Train':>8}  {'Val':>8}  {'Test':>8}")
+print(f"  {'-'*46}")
+print(f"  {'Accuracy':<18} {acc_tr:>8.4f}  {acc_va:>8.4f}  {acc_te:>8.4f}")
+print(f"  {'Recall':<18} {rec_tr:>8.4f}  {rec_va:>8.4f}  {rec_te:>8.4f}")
+print(f"  {'F1-score':<18} {f1_tr:>8.4f}  {f1_va:>8.4f}  {f1_te:>8.4f}")
+print(f"  {'AUC-ROC (test)':<18} {'':>8}  {'':>8}  {auc_te:>8.4f}")
+
+print(f"\n  Importancia de features (XGBoost gain):")
+fi = final_model.feature_importances_
+for feat, imp in sorted(zip(FEATURE_COLS, fi), key=lambda x: -x[1]):
+    bar = "#" * int(imp * 40)
+    print(f"    {feat:<35} {imp:.4f}  {bar}")
+
+# ── Guardar modelo y metadata ─────────────────────────────────────────────────
+print(f"\n{SEP}")
+print("  FASE 5: Guardando modelo")
+print(SEP)
+
+joblib.dump(final_model, MODELO_PATH)
+
+# Guardar metadata de features para el backend
+META_PATH = os.path.join(BASE, "backend_fastapi", "alumnos", "ml", "modelo_meta.json")
+import json
+meta = {
+    "features"      : FEATURE_COLS,
+    "target"        : "tdah_presente",
+    "clases"        : {0: "Sin TDAH", 1: "Con TDAH"},
+    "n_estimators"  : best_iter + 1,
+    "best_recall_cv": float(random_search.best_score_),
+    "test_accuracy" : float(acc_te),
+    "test_recall"   : float(rec_te),
+    "test_auc"      : float(auc_te),
+}
+with open(META_PATH, "w") as f:
+    json.dump(meta, f, indent=2)
+
+print(f"\n  Modelo guardado  : {MODELO_PATH}")
+print(f"  Metadata guardada: {META_PATH}")
+print(f"\n  Accuracy Test : {acc_te:.4f}")
+print(f"  Recall   Test : {rec_te:.4f}")
+print(f"  AUC-ROC  Test : {auc_te:.4f}")
 print(f"\n{SEP}\n")
